@@ -1,7 +1,12 @@
-# macOS / Linux
+# macOS / Linux / Windows
 .DS_Store
-__pycache__/
-*.pyc
+Thumbs.db
+*.log
+
+# Rust 构建产物
+/target
+Cargo.lock
+.env
 
 # 运行期生成的数据（含真实扫描结果与用户配置，勿提交）
 data/watchlist.json
@@ -10,8 +15,3 @@ data/universe.json
 data/mkt_cache.json
 data/config.json
 data/sectors.json
-
-# 本地环境
-.venv/
-venv/
-*.log
