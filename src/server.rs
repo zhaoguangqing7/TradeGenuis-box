@@ -156,8 +156,8 @@ async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
     let scanning = state.scanning.load(Ordering::SeqCst);
     let last_scan = state.last_scan.read().await.clone();
     let logs = state.scan_log.read().await.clone();
-    let keep_logs: Vec<String> = if logs.len() > 12 {
-        logs[logs.len() - 12..].to_vec()
+    let keep_logs: Vec<String> = if logs.len() > 50 {
+        logs[logs.len() - 50..].to_vec()
     } else {
         logs
     };
@@ -345,13 +345,13 @@ struct ScanReq {
 
 async fn post_scan(
     State(state): State<AppState>,
-    Json(body): Json<ScanReq>,
+    body: Option<Json<ScanReq>>,
 ) -> impl IntoResponse {
     if state.scanning.load(Ordering::SeqCst) {
         return Json(serde_json::json!({ "status": "running", "msg": "扫描进行中" })).into_response();
     }
 
-    let mode = body.mode.unwrap_or_else(|| "pool".to_string());
+    let mode = body.and_then(|Json(b)| b.mode).unwrap_or_else(|| "pool".to_string());
     let state_clone = state.clone();
 
     tokio::spawn(async move {
@@ -472,14 +472,14 @@ async fn run_stock_scan(state: AppState, mode: &str) {
             let theme_ok = !hot_hits.is_empty();
 
             let c = done_counter.fetch_add(1, Ordering::SeqCst) + 1;
-            if c % 100 == 0 || c == total_targets {
-                let mut logs = scan_log_c.write().await;
-                logs.push(format!("{}  全市场扫描进度：{}/{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), c, total_targets));
-            }
+            info!(
+                "[{}/{}] 同步 {} {} (最新价: {}, 240根K线/资金/户数已入库)",
+                c, total_targets, code, quote.name, quote.price
+            );
 
             let cand = Candidate {
-                code,
-                name: quote.name,
+                code: code.clone(),
+                name: quote.name.clone(),
                 market: "stock".to_string(),
                 price: quote.price,
                 chg: quote.chg,
@@ -512,7 +512,27 @@ async fn run_stock_scan(state: AppState, mode: &str) {
                 qualified: false,
             };
 
-            Some(score_candidate(cand))
+            let scored = score_candidate(cand);
+
+            {
+                let mut logs = scan_log_c.write().await;
+                logs.push(format!(
+                    "{}  [{}/{}] 同步 {} {} | 评分: {} ({})",
+                    chrono::Local::now().format("%H:%M:%S"),
+                    c,
+                    total_targets,
+                    code,
+                    quote.name,
+                    scored.score,
+                    scored.mode
+                ));
+                if logs.len() > 60 {
+                    let trim = logs.len() - 60;
+                    logs.drain(0..trim);
+                }
+            }
+
+            Some(scored)
         }));
     }
 
