@@ -411,3 +411,68 @@ pub async fn save_system_config(pool: &PgPool, cfg: &SystemConfig) -> Result<(),
     .await?;
     Ok(())
 }
+
+pub async fn save_klines(
+    pool: &PgPool,
+    code: &str,
+    market: &str,
+    bars: &[crate::models::KlineBar],
+) -> Result<(), sqlx::Error> {
+    if bars.is_empty() {
+        return Ok(());
+    }
+
+    let mut codes = Vec::with_capacity(bars.len());
+    let mut markets = Vec::with_capacity(bars.len());
+    let mut dates = Vec::with_capacity(bars.len());
+    let mut opens = Vec::with_capacity(bars.len());
+    let mut highs = Vec::with_capacity(bars.len());
+    let mut lows = Vec::with_capacity(bars.len());
+    let mut closes = Vec::with_capacity(bars.len());
+    let mut volumes = Vec::with_capacity(bars.len());
+
+    for b in bars {
+        if let Ok(d) = chrono::NaiveDate::parse_from_str(&b.date, "%Y-%m-%d") {
+            codes.push(code.to_string());
+            markets.push(market.to_string());
+            dates.push(d);
+            opens.push(b.open);
+            highs.push(b.high);
+            lows.push(b.low);
+            closes.push(b.close);
+            volumes.push(b.vol);
+        }
+    }
+
+    if !dates.is_empty() {
+        sqlx::query(
+            r#"
+            INSERT INTO klines (code, market, k_date, open, high, low, close, volume, created_at)
+            SELECT t.code, t.market, t.k_date, t.open, t.high, t.low, t.close, t.volume, NOW()
+            FROM UNNEST(
+                $1::varchar[],
+                $2::varchar[],
+                $3::date[],
+                $4::float8[],
+                $5::float8[],
+                $6::float8[],
+                $7::float8[],
+                $8::float8[]
+            ) AS t(code, market, k_date, open, high, low, close, volume)
+            ON CONFLICT (code, market, k_date) DO UPDATE
+            SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, close = EXCLUDED.close, volume = EXCLUDED.volume
+            "#,
+        )
+        .bind(&codes)
+        .bind(&markets)
+        .bind(&dates)
+        .bind(&opens)
+        .bind(&highs)
+        .bind(&lows)
+        .bind(&closes)
+        .bind(&volumes)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
