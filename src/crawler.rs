@@ -425,7 +425,41 @@ pub struct UniverseStock {
     pub volume_ratio: f64,
 }
 
+fn parse_num(v: Option<&serde_json::Value>) -> f64 {
+    match v {
+        Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(serde_json::Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+fn parse_str(v: Option<&serde_json::Value>) -> String {
+    match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
 pub async fn fetch_universe(client: &Client) -> Result<Vec<UniverseStock>, String> {
+    // 1. 东财 clist 主源
+    if let Ok(stocks) = fetch_universe_em(client).await {
+        if stocks.len() > 1000 {
+            return Ok(stocks);
+        }
+    }
+
+    // 2. 新浪兜底
+    if let Ok(stocks) = fetch_universe_sina(client).await {
+        if stocks.len() > 1000 {
+            return Ok(stocks);
+        }
+    }
+
+    Err("获取全市场股票清单失败".to_string())
+}
+
+async fn fetch_universe_em(client: &Client) -> Result<Vec<UniverseStock>, String> {
     let mut stocks = Vec::new();
     let mut pn = 1;
     let pz = 100;
@@ -444,12 +478,12 @@ pub async fn fetch_universe(client: &Client) -> Result<Vec<UniverseStock>, Strin
                         let total = data.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
                         if let Some(diff) = data.get("diff").and_then(|d| d.as_array()) {
                             for item in diff {
-                                let code = item.get("f12").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let price = item.get("f2").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let chg = item.get("f3").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let turnover = item.get("f8").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                                let volume_ratio = item.get("f10").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let code = parse_str(item.get("f12"));
+                                let name = parse_str(item.get("f14"));
+                                let price = parse_num(item.get("f2"));
+                                let chg = parse_num(item.get("f3"));
+                                let turnover = parse_num(item.get("f8"));
+                                let volume_ratio = parse_num(item.get("f10"));
 
                                 if !code.is_empty() && price > 0.0 {
                                     stocks.push(UniverseStock {
@@ -464,26 +498,81 @@ pub async fn fetch_universe(client: &Client) -> Result<Vec<UniverseStock>, Strin
                             }
                         }
                         success = true;
-                        if stocks.len() >= total as usize || pn * pz >= total as usize {
+                        if stocks.len() >= total as usize || pn * pz >= total as usize || pn > 80 {
                             return Ok(stocks);
                         }
                         break;
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
 
         if !success {
             break;
         }
         pn += 1;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     if !stocks.is_empty() {
         Ok(stocks)
     } else {
-        Err("获取全市场股票清单失败".to_string())
+        Err("东财全市场获取为空".to_string())
+    }
+}
+
+async fn fetch_universe_sina(client: &Client) -> Result<Vec<UniverseStock>, String> {
+    let mut stocks = Vec::new();
+    let mut page_no = 1;
+
+    loop {
+        let url = format!(
+            "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page={}&num=100&sort=symbol&asc=1&node=hs_a&symbol=&_s_r_a=page",
+            page_no
+        );
+
+        let mut has_data = false;
+        if let Ok(resp) = client.get(&url).send().await {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = val.as_array() {
+                    if !arr.is_empty() {
+                        has_data = true;
+                        for item in arr {
+                            let sym = parse_str(item.get("symbol"));
+                            let name = parse_str(item.get("name"));
+                            let price = parse_num(item.get("trade"));
+                            let chg = parse_num(item.get("changepercent"));
+                            let turnover = parse_num(item.get("turnoverratio"));
+                            let volume_ratio = parse_num(item.get("volume"));
+
+                            let code = if sym.len() > 2 { sym[2..].to_string() } else { sym };
+                            if !code.is_empty() && price > 0.0 {
+                                stocks.push(UniverseStock {
+                                    code,
+                                    name,
+                                    price,
+                                    chg,
+                                    turnover,
+                                    volume_ratio,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !has_data || page_no > 80 {
+            break;
+        }
+        page_no += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    if !stocks.is_empty() {
+        Ok(stocks)
+    } else {
+        Err("新浪全市场获取为空".to_string())
     }
 }
