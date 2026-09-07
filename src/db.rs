@@ -28,8 +28,14 @@ async fn init_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             theme VARCHAR(100) DEFAULT '',
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS scan_records (
             id BIGSERIAL PRIMARY KEY,
             market VARCHAR(20) NOT NULL,
@@ -38,8 +44,14 @@ async fn init_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             total_qualified INT NOT NULL,
             hot_topics JSONB,
             created_at TIMESTAMPTZ DEFAULT NOW()
-        );
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS scan_candidates (
             id BIGSERIAL PRIMARY KEY,
             scan_record_id BIGINT REFERENCES scan_records(id) ON DELETE CASCADE,
@@ -69,10 +81,22 @@ async fn init_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             theme_hint VARCHAR(100),
             flags JSONB,
             created_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_scan_candidates_record ON scan_candidates(scan_record_id);
-        CREATE INDEX IF NOT EXISTS idx_scan_candidates_code ON scan_candidates(code);
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scan_candidates_record ON scan_candidates(scan_record_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scan_candidates_code ON scan_candidates(code)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS klines (
             code VARCHAR(20) NOT NULL,
             market VARCHAR(20) NOT NULL DEFAULT 'stock',
@@ -84,13 +108,19 @@ async fn init_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
             volume DOUBLE PRECISION NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW(),
             PRIMARY KEY (code, market, k_date)
-        );
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS system_config (
             config_key VARCHAR(50) PRIMARY KEY,
             config_value JSONB NOT NULL,
             updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
+        )
         "#,
     )
     .execute(pool)
