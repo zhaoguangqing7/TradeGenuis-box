@@ -387,7 +387,26 @@ async fn run_stock_scan(state: AppState, mode: &str) {
     
     // 获取待扫标的
     let mut targets: Vec<(String, String, String)> = Vec::new();
-    if mode == "pool" {
+    if mode == "market" || mode == "quick" {
+        {
+            let mut logs = state.scan_log.write().await;
+            logs.push(format!("{}  正在拉取全市场股票清单...", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+        }
+        if let Ok(mut all_stocks) = crawler::fetch_universe(&state.client).await {
+            if mode == "quick" {
+                all_stocks.sort_by(|a, b| b.volume_ratio.partial_cmp(&a.volume_ratio).unwrap_or(std::cmp::Ordering::Equal));
+                all_stocks.truncate(200);
+            }
+            let total_count = all_stocks.len();
+            {
+                let mut logs = state.scan_log.write().await;
+                logs.push(format!("{}  已获取 {} 只标的，开始并发分析...", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), total_count));
+            }
+            for s in all_stocks {
+                targets.push((s.code, s.name, String::new()));
+            }
+        }
+    } else if mode == "pool" {
         if let Some(pool) = &state.pg_pool {
             if let Ok(stocks) = db::get_pool_stocks(pool).await {
                 for s in stocks {
@@ -421,13 +440,26 @@ async fn run_stock_scan(state: AppState, mode: &str) {
         }
     }
 
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(16));
+    let total_targets = targets.len();
+    let completed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
     let mut candidate_futures = Vec::new();
     for (code, _name, theme) in targets {
         let client = state.client.clone();
         let hot_names_c = hot_names.clone();
+        let pg_pool_c = state.pg_pool.clone();
+        let sem = semaphore.clone();
+        let done_counter = completed_count.clone();
+        let scan_log_c = state.scan_log.clone();
+
         candidate_futures.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.ok()?;
             let quote = crawler::fetch_quote(&client, &code).await.ok()?;
-            let bars = crawler::fetch_kline(&client, &code, 160).await.ok()?;
+            let bars = crawler::fetch_kline(&client, &code, 240).await.ok()?;
+            if let Some(ref pool) = pg_pool_c {
+                let _ = db::save_klines(pool, &code, "stock", &bars).await;
+            }
             let ffs = crawler::fetch_fund_flow(&client, &code, 11).await;
             let holder = crawler::fetch_holder(&client, &code).await;
             let concepts = crawler::fetch_concepts(&client, &code).await;
@@ -438,6 +470,12 @@ async fn run_stock_scan(state: AppState, mode: &str) {
             let ctrl = crate::engine::compute_control(quote.turnover, holder.as_ref());
             let hot_hits = crate::engine::match_hot(&concepts, &hot_names_c);
             let theme_ok = !hot_hits.is_empty();
+
+            let c = done_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if c % 100 == 0 || c == total_targets {
+                let mut logs = scan_log_c.write().await;
+                logs.push(format!("{}  全市场扫描进度：{}/{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), c, total_targets));
+            }
 
             let cand = Candidate {
                 code,
@@ -528,10 +566,14 @@ async fn run_crypto_scan(state: AppState) {
     let mut candidate_futures = Vec::new();
     for t in top_tickers {
         let client = state.client.clone();
+        let pg_pool_c = state.pg_pool.clone();
         candidate_futures.push(tokio::spawn(async move {
-            let bars = crawler::fetch_crypto_kline(&client, &t.name, 200).await;
+            let bars = crawler::fetch_crypto_kline(&client, &t.name, 240).await;
             if bars.len() < 40 {
                 return None;
+            }
+            if let Some(ref pool) = pg_pool_c {
+                let _ = db::save_klines(pool, &t.name, "crypto", &bars).await;
             }
             let vol = crate::engine::compute_volume(&bars);
             let box_res = crate::engine::compute_box(&bars);

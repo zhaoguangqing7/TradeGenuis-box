@@ -412,3 +412,78 @@ pub async fn fetch_crypto_kline(client: &Client, symbol: &str, limit: usize) -> 
     }
     Vec::new()
 }
+
+const UNIVERSE_FS: &str = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UniverseStock {
+    pub code: String,
+    pub name: String,
+    pub price: f64,
+    pub chg: f64,
+    pub turnover: f64,
+    pub volume_ratio: f64,
+}
+
+pub async fn fetch_universe(client: &Client) -> Result<Vec<UniverseStock>, String> {
+    let mut stocks = Vec::new();
+    let mut pn = 1;
+    let pz = 100;
+
+    loop {
+        let url = format!(
+            "https://push2.eastmoney.com/api/qt/clist/get?pn={}&pz={}&po=1&np=1&fltt=2&invt=2&fid=f12&fs={}&fields=f2,f3,f8,f10,f12,f14,f20",
+            pn, pz, UNIVERSE_FS
+        );
+
+        let mut success = false;
+        for _ in 0..3 {
+            if let Ok(resp) = client.get(&url).send().await {
+                if let Ok(val) = resp.json::<serde_json::Value>().await {
+                    if let Some(data) = val.get("data") {
+                        let total = data.get("total").and_then(|v| v.as_i64()).unwrap_or(0);
+                        if let Some(diff) = data.get("diff").and_then(|d| d.as_array()) {
+                            for item in diff {
+                                let code = item.get("f12").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let price = item.get("f2").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let chg = item.get("f3").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let turnover = item.get("f8").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let volume_ratio = item.get("f10").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                                if !code.is_empty() && price > 0.0 {
+                                    stocks.push(UniverseStock {
+                                        code,
+                                        name,
+                                        price,
+                                        chg,
+                                        turnover,
+                                        volume_ratio,
+                                    });
+                                }
+                            }
+                        }
+                        success = true;
+                        if stocks.len() >= total as usize || pn * pz >= total as usize {
+                            return Ok(stocks);
+                        }
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+
+        if !success {
+            break;
+        }
+        pn += 1;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if !stocks.is_empty() {
+        Ok(stocks)
+    } else {
+        Err("获取全市场股票清单失败".to_string())
+    }
+}
