@@ -234,42 +234,121 @@ pub async fn fetch_fund_flow(client: &Client, code: &str, days: usize) -> Vec<Fu
     Vec::new()
 }
 
-pub async fn fetch_concept_boards(client: &Client) -> Vec<ConceptBoard> {
-    let url = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=80&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f3,f8,f12,f14,f62,f104,f105,f109";
-    if let Ok(resp) = client.get(url).send().await {
-        if let Ok(val) = resp.json::<serde_json::Value>().await {
-            if let Some(diff) = val.get("data").and_then(|d| d.get("diff")).and_then(|d| d.as_array()) {
-                let mut boards = Vec::new();
-                for item in diff {
-                    let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-                    if name.is_empty() || JUNK_BOARD_RE.is_match(&name) {
-                        continue;
-                    }
-                    let code = item.get("f12").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let chg1 = item.get("f3").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let chg5 = item.get("f109").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let main = item.get("f62").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let up = item.get("f104").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                    let down = item.get("f105").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+pub fn parse_sina_boards(raw: &str) -> Vec<ConceptBoard> {
+    let mut boards = Vec::new();
+    // 匹配 "key":"code,name,count,chg,..." 或 key:"code,name,count,chg,..."
+    let re = match Regex::new(r#"["']?(\w+)["']?\s*:\s*["']([^"']+)["']"#) {
+        Ok(r) => r,
+        Err(_) => return boards,
+    };
 
-                    if up + down >= 5 {
-                        boards.push(ConceptBoard {
-                            code,
-                            name,
-                            chg1,
-                            chg5,
-                            main,
-                            up,
-                            down,
-                            matched: false,
-                        });
+    for cap in re.captures_iter(raw) {
+        if let Some(val) = cap.get(2) {
+            let parts: Vec<&str> = val.as_str().split(',').collect();
+            if parts.len() >= 4 {
+                let code = parts[0].trim().to_string();
+                let name = parts[1].trim().to_string();
+                if name.is_empty() || JUNK_BOARD_RE.is_match(&name) {
+                    continue;
+                }
+                let count = parts[2].trim().parse::<i32>().unwrap_or(0);
+                let chg1 = parts[3].trim().parse::<f64>().unwrap_or(0.0);
+                if count >= 3 {
+                    boards.push(ConceptBoard {
+                        code,
+                        name,
+                        chg1,
+                        chg5: chg1,
+                        main: 0.0,
+                        up: count / 2,
+                        down: count / 2,
+                        matched: false,
+                    });
+                }
+            }
+        }
+    }
+    boards
+}
+
+pub async fn fetch_concept_boards(client: &Client) -> Vec<ConceptBoard> {
+    // 1. 东方财富多集群节点轮询（优先主节点，备用 82 / 54 / push2ex 容灾）
+    let em_nodes = [
+        "https://push2.eastmoney.com",
+        "https://82.push2.eastmoney.com",
+        "https://54.push2.eastmoney.com",
+        "https://push2ex.eastmoney.com",
+    ];
+
+    for base in em_nodes {
+        let url = format!(
+            "{}/api/qt/clist/get?pn=1&pz=80&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3+f:!50&fields=f3,f8,f12,f14,f62,f104,f105,f109",
+            base
+        );
+        if let Ok(resp) = client.get(&url).header("Referer", "https://quote.eastmoney.com/").send().await {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                if let Some(diff) = val.get("data").and_then(|d| d.get("diff")).and_then(|d| d.as_array()) {
+                    let mut boards = Vec::new();
+                    for item in diff {
+                        let name = item.get("f14").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+                        if name.is_empty() || JUNK_BOARD_RE.is_match(&name) {
+                            continue;
+                        }
+                        let code = item.get("f12").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let chg1 = item.get("f3").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let chg5 = item.get("f109").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let main = item.get("f62").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let up = item.get("f104").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                        let down = item.get("f105").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+                        if up + down >= 3 {
+                            boards.push(ConceptBoard {
+                                code,
+                                name,
+                                chg1,
+                                chg5,
+                                main,
+                                up,
+                                down,
+                                matched: false,
+                            });
+                        }
+                    }
+                    if boards.len() >= 5 {
+                        boards.sort_by(|a, b| b.chg1.partial_cmp(&a.chg1).unwrap_or(std::cmp::Ordering::Equal));
+                        return boards;
                     }
                 }
+            }
+        }
+    }
+
+    // 2. 新浪财经概念板块接口容灾 (Sina Concept Boards with GBK decode)
+    let sina_concept_url = "http://money.finance.sina.com.cn/q/view/newFLJK.php?param=class";
+    if let Ok(resp) = client.get(sina_concept_url).header("Referer", "http://finance.sina.com.cn").send().await {
+        if let Ok(bytes) = resp.bytes().await {
+            let (cow, _, _) = encoding_rs::GBK.decode(&bytes);
+            let mut boards = parse_sina_boards(&cow);
+            if boards.len() >= 5 {
                 boards.sort_by(|a, b| b.chg1.partial_cmp(&a.chg1).unwrap_or(std::cmp::Ordering::Equal));
                 return boards;
             }
         }
     }
+
+    // 3. 新浪财经行业板块接口容灾 (Sina Industry Boards with GBK decode)
+    let sina_hy_url = "http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php";
+    if let Ok(resp) = client.get(sina_hy_url).header("Referer", "http://finance.sina.com.cn").send().await {
+        if let Ok(bytes) = resp.bytes().await {
+            let (cow, _, _) = encoding_rs::GBK.decode(&bytes);
+            let mut boards = parse_sina_boards(&cow);
+            if !boards.is_empty() {
+                boards.sort_by(|a, b| b.chg1.partial_cmp(&a.chg1).unwrap_or(std::cmp::Ordering::Equal));
+                return boards;
+            }
+        }
+    }
+
     Vec::new()
 }
 
