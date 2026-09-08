@@ -246,6 +246,7 @@ pub async fn get_latest_scan(
             FROM scan_candidates
             WHERE scan_record_id = $1
             ORDER BY score DESC, chg DESC
+            LIMIT 150
             "#,
         )
         .bind(record_id)
@@ -475,4 +476,44 @@ pub async fn save_klines(
         .await?;
     }
     Ok(())
+}
+
+pub async fn get_klines(
+    pool: &PgPool,
+    code: &str,
+    market: &str,
+    limit: usize,
+) -> Result<Vec<crate::models::KlineBar>, sqlx::Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT k_date, open, high, low, close, volume
+        FROM (
+            SELECT k_date, open, high, low, close, volume
+            FROM klines
+            WHERE code = $1 AND market = $2
+            ORDER BY k_date DESC
+            LIMIT $3
+        ) sub
+        ORDER BY k_date ASC
+        "#,
+    )
+    .bind(code)
+    .bind(market)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await?;
+
+    let mut bars = Vec::with_capacity(rows.len());
+    for r in rows {
+        let d: chrono::NaiveDate = r.get("k_date");
+        bars.push(crate::models::KlineBar {
+            date: d.format("%Y-%m-%d").to_string(),
+            open: r.get("open"),
+            close: r.get("close"),
+            high: r.get("high"),
+            low: r.get("low"),
+            vol: r.get("volume"),
+        });
+    }
+    Ok(bars)
 }

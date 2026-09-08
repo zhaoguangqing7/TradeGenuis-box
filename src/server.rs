@@ -50,7 +50,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/config", get(get_config).post(post_config))
         .route("/api/quotes", get(get_quotes))
         .route("/api/kline", get(get_kline))
-        .route("/api/scan", post(post_scan))
+        .route("/api/scan", get(handle_scan).post(handle_scan))
         .nest_service("/static", ServeDir::new(static_dir))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -306,24 +306,31 @@ async fn get_kline(
             "box": box_res,
         })
     } else {
-        let quote_res = fetch_quote(&state.client, &code).await.ok();
-        let bars = crawler::fetch_kline(&state.client, &code, lmt).await.unwrap_or_default();
+        let mut bars = if let Some(ref pool) = state.pg_pool {
+            db::get_klines(pool, &code, &market, lmt).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        if bars.len() < 30 {
+            if let Ok(c_bars) = crawler::fetch_kline(&state.client, &code, lmt).await {
+                if !c_bars.is_empty() {
+                    bars = c_bars;
+                }
+            }
+        }
+
         let box_res = compute_box(&bars);
         let last_date = bars.last().map(|b| b.date.clone()).unwrap_or_default();
-
-        let (name, price, chg, turnover, volume_ratio) = if let Some(q) = quote_res {
-            (q.name, q.price, q.chg, Some(q.turnover), q.volume_ratio)
-        } else {
-            (code.clone(), 0.0, 0.0, None, 0.0)
-        };
+        let last_close = bars.last().map(|b| b.close).unwrap_or(0.0);
 
         serde_json::json!({
             "code": code,
-            "name": name,
-            "price": price,
-            "chg": chg,
-            "turnover": turnover,
-            "volume_ratio": volume_ratio,
+            "name": code,
+            "price": last_close,
+            "chg": null,
+            "turnover": null,
+            "volume_ratio": null,
             "bar_date": last_date,
             "bars": bars,
             "box": box_res,
@@ -338,27 +345,32 @@ async fn get_kline(
     Json(payload).into_response()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ScanReq {
     mode: Option<String>,
 }
 
-async fn post_scan(
+async fn handle_scan(
     State(state): State<AppState>,
+    Query(query): Query<ScanReq>,
     body: Option<Json<ScanReq>>,
 ) -> impl IntoResponse {
     if state.scanning.load(Ordering::SeqCst) {
         return Json(serde_json::json!({ "status": "running", "msg": "扫描进行中" })).into_response();
     }
 
-    let mode = body.and_then(|Json(b)| b.mode).unwrap_or_else(|| "pool".to_string());
+    let mode = query.mode
+        .or_else(|| body.and_then(|Json(b)| b.mode))
+        .unwrap_or_else(|| "market".to_string());
+
     let state_clone = state.clone();
+    let mode_task = mode.clone();
 
     tokio::spawn(async move {
-        run_scan_task(state_clone, mode).await;
+        run_scan_task(state_clone, mode_task).await;
     });
 
-    Json(serde_json::json!({ "status": "started" })).into_response()
+    Json(serde_json::json!({ "status": "started", "mode": mode })).into_response()
 }
 
 pub async fn run_scan_task(state: AppState, mode: String) {
