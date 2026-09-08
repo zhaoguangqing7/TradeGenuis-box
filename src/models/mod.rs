@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Quote {
+    #[serde(default)]
+    pub code: String,
     pub price: f64,
     pub chg: f64,
     pub name: String,
@@ -62,7 +64,7 @@ pub struct BoxAnalysis {
     pub pos_pct: f64,
     pub span_pct: f64,
     pub window: String,
-    pub box_end: usize,
+    pub box_end: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,9 +78,19 @@ pub struct FundAnalysis {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlAnalysis {
     pub control: String,
-    pub holder_ratio: Option<f64>,
     pub control_note: String,
+    pub holder_ratio: Option<f64>,
     pub holder_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TradePlan {
+    pub signal_type: String,       // 实战操作指令:  突破买入, 蓄势待发, 主力试盘, 箱内震荡
+    pub buy_trigger_price: f64,   // 突破买入触发价 (箱顶临界)
+    pub stop_loss_price: f64,     // 刚性止损价
+    pub target_price: f64,        // 目标止盈价
+    pub rr_ratio: f64,            // 预期盈亏比 (如 2.8 表示 1:2.8)
+    pub breakout_dist_pct: f64,   // 距突破临界点涨跌幅 (如 +0.5% 已突破, -1.2% 距突破差1.2%)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,21 +127,9 @@ pub struct Candidate {
     pub flag_pairs: Vec<(String, i32)>,
     pub mode: String,
     pub qualified: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolItem {
-    pub code: String,
-    pub name: String,
-    #[serde(default)]
-    pub theme: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolFile {
-    #[serde(default)]
-    pub updated: Option<String>,
-    pub stocks: Vec<PoolItem>,
+    
+    // 实战交易决策增强
+    pub trade_plan: Option<TradePlan>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,16 +139,27 @@ pub struct ScanPayload {
     pub total: usize,
     pub qualified: usize,
     pub candidates: Vec<Candidate>,
-    #[serde(default)]
     pub hot_topics: Vec<ConceptBoard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolItem {
+    pub code: String,
+    pub name: String,
+    pub theme: String,
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolFile {
+    pub stocks: Vec<PoolItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     pub auto: bool,
     pub auto_times: Vec<String>,
-    pub tg_token: String,
-    pub tg_chat: String,
+    pub auto_interval_sec: u64,
 }
 
 impl Default for SystemConfig {
@@ -156,8 +167,7 @@ impl Default for SystemConfig {
         Self {
             auto: true,
             auto_times: vec!["11:30".to_string(), "15:00".to_string()],
-            tg_token: String::new(),
-            tg_chat: String::new(),
+            auto_interval_sec: 1800,
         }
     }
 }

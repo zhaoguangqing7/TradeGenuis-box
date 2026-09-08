@@ -129,6 +129,56 @@
     .sig-line span.no { color: var(--ink-faint); }
     .sig-line .box { font-family: var(--mono); color: var(--ink-faint); font-size: 11.5px; }
 
+    /* 实战交易决策卡片条 */
+    .trade-plan-box {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(229, 212, 182, 0.04);
+      border: 1px solid rgba(229, 212, 182, 0.09);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .tp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      font-size: 11.5px;
+    }
+    .tp-sig-tag {
+      font-family: var(--sans);
+      font-weight: 700;
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 4px;
+      letter-spacing: .02em;
+    }
+    .tp-sig-buy { background: rgba(155,213,151,0.22); color: var(--up); border: 1px solid rgba(155,213,151,0.4); }
+    .tp-sig-ready { background: rgba(229,184,104,0.2); color: #E5B868; border: 1px solid rgba(229,184,104,0.35); }
+    .tp-sig-test { background: rgba(110,168,254,0.18); color: #8cb8ff; border: 1px solid rgba(110,168,254,0.3); }
+    .tp-sig-range { background: rgba(229,212,182,0.08); color: var(--ink-dim); }
+    .tp-dist { font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
+    .tp-rr { font-family: var(--num); font-size: 11.5px; color: var(--up); font-weight: 600; }
+    .tp-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      text-align: center;
+      background: rgba(0, 0, 0, 0.15);
+      border-radius: 6px;
+      padding: 4px 6px;
+    }
+    .tp-col { display: flex; flex-direction: column; gap: 1px; }
+    .tp-lbl { font-size: 10px; color: var(--ink-faint); }
+    .tp-val { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+    .tp-val.buy { color: var(--up); }
+    .tp-val.stop { color: var(--down); }
+    .tp-val.target { color: #E5B868; }
+    .cd-copy { cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+    .cd-copy:hover { color: var(--mint); text-decoration: underline; }
+
     /* 空态 / 骨架 */
     .empty { color: var(--ink-faint); font-size: 12px; padding: 26px 0; text-align: center; }
     .empty .big { font-family: var(--num); font-size: 18px; font-weight: 700; letter-spacing: .14em; margin-bottom: 8px; }
@@ -321,6 +371,18 @@ function renderCards(rows) {
   shown.forEach(r => loadChart(r.code));
 }
 
+function copyCode(code) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code).then(() => {
+      toast("已复制 " + code);
+    }).catch(() => {
+      toast("代码：" + code);
+    });
+  } else {
+    toast("代码：" + code);
+  }
+}
+
 function cardHTML(r, i) {
   const isCrypto = S.market === "crypto";
   const items = isCrypto
@@ -346,14 +408,50 @@ function cardHTML(r, i) {
     : r.score >= 50 
     ? 'color:#E5B868; background:rgba(229,184,104,.15); font-weight:600;' 
     : 'color:var(--ink-faint); background:rgba(229,212,182,.06);';
+
+  let planHtml = "";
+  if (r.trade_plan) {
+    const tp = r.trade_plan;
+    let sigClass = "tp-sig-range";
+    if (tp.signal_type.includes("买入")) sigClass = "tp-sig-buy";
+    else if (tp.signal_type.includes("蓄势")) sigClass = "tp-sig-ready";
+    else if (tp.signal_type.includes("试盘")) sigClass = "tp-sig-test";
+
+    const distText = tp.breakout_dist_pct >= 0 
+      ? `已突破 +${tp.breakout_dist_pct.toFixed(2)}%`
+      : `距突破 ${tp.breakout_dist_pct.toFixed(2)}%`;
+
+    const triggerP = isCrypto ? fmtc(tp.buy_trigger_price) : fmt2(tp.buy_trigger_price);
+    const stopP = isCrypto ? fmtc(tp.stop_loss_price) : fmt2(tp.stop_loss_price);
+    const targetP = isCrypto ? fmtc(tp.target_price) : fmt2(tp.target_price);
+
+    planHtml = `
+    <div class="trade-plan-box">
+      <div class="tp-header">
+        <span class="tp-sig-tag ${sigClass}">${tp.signal_type}</span>
+        <span class="tp-dist">${distText}</span>
+        <span class="tp-rr">盈亏比 <b>1:${tp.rr_ratio.toFixed(1)}</b></span>
+      </div>
+      <div class="tp-grid">
+        <div class="tp-col"><span class="tp-lbl">触发买入</span><span class="tp-val buy">${triggerP}</span></div>
+        <div class="tp-col"><span class="tp-lbl">刚性止损</span><span class="tp-val stop">${stopP}</span></div>
+        <div class="tp-col"><span class="tp-lbl">第一目标</span><span class="tp-val target">${targetP}</span></div>
+      </div>
+    </div>`;
+  }
+
   return `<article class="sig${r.qualified ? ' q' : ''}" data-code="${r.code}" data-market="${S.market}" style="animation-delay:${Math.min(i * 50, 400)}ms">
     <div class="sig-top">
-      <div><div class="nm">${r.name}${qBadge}</div><div class="cd">${r.code}</div></div>
+      <div>
+        <div class="nm">${r.name}${qBadge}</div>
+        <div class="cd cd-copy" title="点击复制" onclick="copyCode('${r.code}')">${r.code} <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg></div>
+      </div>
       <div class="sig-top-right"><span class="px" data-px>${price}</span>
         <span class="chg ${clsOf(r.chg)}" data-chg>${chgText}</span>
         <span class="score-badge" style="${scoreBadgeStyle}">${r.score}</span></div>
     </div>
     <div class="sig-chart"><canvas height="264" data-code="${r.code}" data-market="${S.market}"></canvas><div class="tip" data-code="${r.code}"></div></div>
+    ${planHtml}
     <div class="sig-line">
       ${items.map(([t, v, ok]) => ok
         ? `<span><b>${t}</b> ${v}</span>`

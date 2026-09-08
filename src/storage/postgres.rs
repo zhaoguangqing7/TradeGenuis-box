@@ -1,126 +1,101 @@
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
-use std::time::Duration;
 use tracing::info;
 
-use crate::models::{Candidate, ConceptBoard, PoolItem, ScanPayload, SystemConfig};
+use crate::models::{Candidate, ConceptBoard, KlineBar, PoolItem, ScanPayload, SystemConfig, TradePlan};
 
-pub async fn init_pool(database_url: &str) -> Result<PgPool, sqlx::Error> {
+pub async fn init_pool(db_url: &str) -> Result<PgPool, sqlx::Error> {
     info!("正在连接 PostgreSQL 数据库...");
     let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(database_url)
+        .max_connections(20)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(db_url)
         .await?;
 
     info!("PostgreSQL 连接成功，开始执行表结构初始化...");
-    init_tables(&pool).await?;
+    init_schema(&pool).await?;
     info!("PostgreSQL 表结构检查/初始化完毕");
 
     Ok(pool)
 }
 
-async fn init_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+pub async fn init_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS pool (
-            code VARCHAR(20) PRIMARY KEY,
-            name VARCHAR(50) NOT NULL,
-            theme VARCHAR(100) DEFAULT '',
+            id SERIAL PRIMARY KEY,
+            code VARCHAR(20) NOT NULL UNIQUE,
+            name VARCHAR(100) NOT NULL,
+            theme VARCHAR(255) DEFAULT '',
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
+        );
 
-    sqlx::query(
-        r#"
         CREATE TABLE IF NOT EXISTS scan_records (
             id BIGSERIAL PRIMARY KEY,
             market VARCHAR(20) NOT NULL,
-            scan_type VARCHAR(20) NOT NULL,
+            scan_type VARCHAR(50) NOT NULL,
             total_scanned INT NOT NULL,
             total_qualified INT NOT NULL,
             hot_topics JSONB,
             created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
+        );
 
-    sqlx::query(
-        r#"
         CREATE TABLE IF NOT EXISTS scan_candidates (
             id BIGSERIAL PRIMARY KEY,
             scan_record_id BIGINT REFERENCES scan_records(id) ON DELETE CASCADE,
             code VARCHAR(20) NOT NULL,
-            name VARCHAR(50) NOT NULL,
+            name VARCHAR(100) NOT NULL,
             market VARCHAR(20) NOT NULL,
-            price DOUBLE PRECISION,
-            chg DOUBLE PRECISION,
-            turnover DOUBLE PRECISION,
+            price FLOAT8 NOT NULL,
+            chg FLOAT8 NOT NULL,
+            turnover FLOAT8,
             score INT NOT NULL,
-            mode VARCHAR(30) NOT NULL,
-            qualified BOOLEAN NOT NULL DEFAULT FALSE,
-            box_low DOUBLE PRECISION,
-            box_high DOUBLE PRECISION,
-            pos_pct DOUBLE PRECISION,
-            box_span_pct DOUBLE PRECISION,
-            box_window VARCHAR(50),
-            tests INT DEFAULT 0,
+            mode VARCHAR(50) NOT NULL,
+            qualified BOOLEAN NOT NULL,
+            box_low FLOAT8,
+            box_high FLOAT8,
+            pos_pct FLOAT8,
+            box_span_pct FLOAT8,
+            box_window VARCHAR(100),
+            tests INT NOT NULL DEFAULT 0,
             test_dates JSONB,
-            volume_days INT DEFAULT 0,
-            volume_ratio DOUBLE PRECISION,
-            fund_5d DOUBLE PRECISION,
-            fund_state VARCHAR(20),
-            control VARCHAR(20),
-            control_note VARCHAR(100),
-            theme_ok BOOLEAN DEFAULT FALSE,
-            theme_hint VARCHAR(100),
+            volume_days INT NOT NULL DEFAULT 0,
+            volume_ratio FLOAT8 NOT NULL DEFAULT 0.0,
+            fund_5d FLOAT8,
+            fund_state VARCHAR(50),
+            control VARCHAR(50),
+            control_note VARCHAR(255),
+            theme_ok BOOLEAN NOT NULL DEFAULT FALSE,
+            theme_hint VARCHAR(255),
             flags JSONB,
+            trade_plan JSONB,
             created_at TIMESTAMPTZ DEFAULT NOW()
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
+        );
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scan_candidates_record ON scan_candidates(scan_record_id)")
-        .execute(pool)
-        .await?;
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_scan_candidates_code ON scan_candidates(code)")
-        .execute(pool)
-        .await?;
-
-    sqlx::query(
-        r#"
         CREATE TABLE IF NOT EXISTS klines (
+            id BIGSERIAL PRIMARY KEY,
             code VARCHAR(20) NOT NULL,
-            market VARCHAR(20) NOT NULL DEFAULT 'stock',
+            market VARCHAR(20) NOT NULL,
             k_date DATE NOT NULL,
-            open DOUBLE PRECISION NOT NULL,
-            high DOUBLE PRECISION NOT NULL,
-            low DOUBLE PRECISION NOT NULL,
-            close DOUBLE PRECISION NOT NULL,
-            volume DOUBLE PRECISION NOT NULL,
+            open FLOAT8 NOT NULL,
+            high FLOAT8 NOT NULL,
+            low FLOAT8 NOT NULL,
+            close FLOAT8 NOT NULL,
+            volume FLOAT8 NOT NULL,
             created_at TIMESTAMPTZ DEFAULT NOW(),
-            PRIMARY KEY (code, market, k_date)
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
+            CONSTRAINT uq_code_market_kdate UNIQUE (code, market, k_date)
+        );
 
-    sqlx::query(
-        r#"
         CREATE TABLE IF NOT EXISTS system_config (
-            config_key VARCHAR(50) PRIMARY KEY,
+            config_key VARCHAR(100) PRIMARY KEY,
             config_value JSONB NOT NULL,
             updated_at TIMESTAMPTZ DEFAULT NOW()
-        )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_records_mkt_time ON scan_records(market, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_scan_candidates_rec_score ON scan_candidates(scan_record_id, score DESC, chg DESC);
+        CREATE INDEX IF NOT EXISTS idx_klines_lookup ON klines(code, market, k_date DESC);
         "#,
     )
     .execute(pool)
@@ -137,21 +112,21 @@ pub async fn save_scan_record(
     hot_topics: &[ConceptBoard],
 ) -> Result<i64, sqlx::Error> {
     let qualified_count = candidates.iter().filter(|c| c.qualified).count() as i32;
-    let total_scanned = candidates.len() as i32;
-    let hot_json = serde_json::to_value(hot_topics).unwrap_or(serde_json::Value::Null);
+    let total_count = candidates.len() as i32;
+    let hot_topics_json = serde_json::to_value(hot_topics).unwrap_or(serde_json::Value::Null);
 
     let row = sqlx::query(
         r#"
-        INSERT INTO scan_records (market, scan_type, total_scanned, total_qualified, hot_topics)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO scan_records (market, scan_type, total_scanned, total_qualified, hot_topics, created_at)
+        VALUES ($1, $2, $3, $4, $5, NOW())
         RETURNING id
         "#,
     )
     .bind(market)
     .bind(scan_type)
-    .bind(total_scanned)
+    .bind(total_count)
     .bind(qualified_count)
-    .bind(hot_json)
+    .bind(hot_topics_json)
     .fetch_one(pool)
     .await?;
 
@@ -160,19 +135,20 @@ pub async fn save_scan_record(
     for c in candidates {
         let test_dates_json = serde_json::to_value(&c.test_dates).unwrap_or(serde_json::Value::Null);
         let flags_json = serde_json::to_value(&c.flags).unwrap_or(serde_json::Value::Null);
+        let trade_plan_json = serde_json::to_value(&c.trade_plan).unwrap_or(serde_json::Value::Null);
 
         sqlx::query(
             r#"
             INSERT INTO scan_candidates (
                 scan_record_id, code, name, market, price, chg, turnover,
-                score, mode, qualified, box_low, box_high, pos_pct, box_span_pct,
-                box_window, tests, test_dates, volume_days, volume_ratio,
-                fund_5d, fund_state, control, control_note, theme_ok, theme_hint, flags
+                score, mode, qualified, box_low, box_high, pos_pct,
+                box_span_pct, box_window, tests, test_dates, volume_days, volume_ratio,
+                fund_5d, fund_state, control, control_note, theme_ok, theme_hint, flags, trade_plan
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 $8, $9, $10, $11, $12, $13, $14,
                 $15, $16, $17, $18, $19,
-                $20, $21, $22, $23, $24, $25, $26
+                $20, $21, $22, $23, $24, $25, $26, $27
             )
             "#,
         )
@@ -202,6 +178,7 @@ pub async fn save_scan_record(
         .bind(c.theme_ok)
         .bind(&c.theme_hint)
         .bind(flags_json)
+        .bind(trade_plan_json)
         .execute(pool)
         .await?;
     }
@@ -242,7 +219,7 @@ pub async fn get_latest_scan(
             SELECT code, name, market, price, chg, turnover, score, mode, qualified,
                    box_low, box_high, pos_pct, box_span_pct, box_window, tests,
                    test_dates, volume_days, volume_ratio, fund_5d, fund_state,
-                   control, control_note, theme_ok, theme_hint, flags
+                   control, control_note, theme_ok, theme_hint, flags, trade_plan
             FROM scan_candidates
             WHERE scan_record_id = $1
             ORDER BY score DESC, chg DESC
@@ -263,39 +240,30 @@ pub async fn get_latest_scan(
                 .get::<Option<serde_json::Value>, _>("flags")
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
-
-            let price: Option<f64> = r.get("price");
-            let chg: Option<f64> = r.get("chg");
-            let turnover: Option<f64> = r.get("turnover");
-            let box_low: Option<f64> = r.get("box_low");
-            let box_high: Option<f64> = r.get("box_high");
-            let pos_pct: Option<f64> = r.get("pos_pct");
-            let box_span_pct: Option<f64> = r.get("box_span_pct");
-            let volume_ratio: Option<f64> = r.get("volume_ratio");
-            let fund_5d: Option<f64> = r.get("fund_5d");
-
-            let fund_5d_str = fund_5d.map(|f| format!("{:+0.0}万", f)).unwrap_or_else(|| "—".to_string());
+            let trade_plan: Option<TradePlan> = r
+                .get::<Option<serde_json::Value>, _>("trade_plan")
+                .and_then(|v| serde_json::from_value(v).ok());
 
             candidates.push(Candidate {
                 code: r.get("code"),
                 name: r.get("name"),
                 market: r.get("market"),
-                price: price.unwrap_or(0.0),
-                chg: chg.unwrap_or(0.0),
-                turnover,
-                volume_ratio: volume_ratio.unwrap_or(0.0),
+                price: r.get("price"),
+                chg: r.get("chg"),
+                turnover: r.get("turnover"),
+                volume_ratio: r.get("volume_ratio"),
                 volume_days: r.get("volume_days"),
-                box_low,
-                box_high,
-                pos_pct,
-                box_span_pct,
+                box_low: r.get("box_low"),
+                box_high: r.get("box_high"),
+                pos_pct: r.get("pos_pct"),
+                box_span_pct: r.get("box_span_pct"),
                 box_window: r.get("box_window"),
                 tests: r.get("tests"),
                 test_dates,
-                fund_5d,
+                fund_5d: r.get("fund_5d"),
                 inflow_days: None,
                 fund_state: r.get("fund_state"),
-                fund_5d_str: Some(fund_5d_str),
+                fund_5d_str: None,
                 control: r.get("control"),
                 control_note: r.get("control_note"),
                 holder_ratio: None,
@@ -309,11 +277,12 @@ pub async fn get_latest_scan(
                 flag_pairs: Vec::new(),
                 mode: r.get("mode"),
                 qualified: r.get("qualified"),
+                trade_plan,
             });
         }
 
         return Ok(Some(ScanPayload {
-            as_of: created_at.to_rfc3339(),
+            as_of: created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string(),
             scan_type,
             total: total as usize,
             qualified: qualified as usize,
@@ -328,23 +297,25 @@ pub async fn get_latest_scan(
 pub async fn get_pool_stocks(pool: &PgPool) -> Result<Vec<PoolItem>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
-        SELECT code, name, theme
+        SELECT code, name, theme, created_at
         FROM pool
-        ORDER BY created_at ASC
+        ORDER BY updated_at DESC, id DESC
         "#,
     )
     .fetch_all(pool)
     .await?;
 
-    let mut list = Vec::new();
+    let mut stocks = Vec::new();
     for r in rows {
-        list.push(PoolItem {
+        let created_at: chrono::DateTime<chrono::Utc> = r.get("created_at");
+        stocks.push(PoolItem {
             code: r.get("code"),
             name: r.get("name"),
             theme: r.get("theme"),
+            created_at: Some(created_at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string()),
         });
     }
-    Ok(list)
+    Ok(stocks)
 }
 
 pub async fn add_pool_stock(
@@ -417,7 +388,7 @@ pub async fn save_klines(
     pool: &PgPool,
     code: &str,
     market: &str,
-    bars: &[crate::models::KlineBar],
+    bars: &[KlineBar],
 ) -> Result<(), sqlx::Error> {
     if bars.is_empty() {
         return Ok(());
@@ -483,7 +454,7 @@ pub async fn get_klines(
     code: &str,
     market: &str,
     limit: usize,
-) -> Result<Vec<crate::models::KlineBar>, sqlx::Error> {
+) -> Result<Vec<KlineBar>, sqlx::Error> {
     let rows = sqlx::query(
         r#"
         SELECT k_date, open, high, low, close, volume
@@ -506,7 +477,7 @@ pub async fn get_klines(
     let mut bars = Vec::with_capacity(rows.len());
     for r in rows {
         let d: chrono::NaiveDate = r.get("k_date");
-        bars.push(crate::models::KlineBar {
+        bars.push(KlineBar {
             date: d.format("%Y-%m-%d").to_string(),
             open: r.get("open"),
             close: r.get("close"),
