@@ -21,3 +21,11 @@ dotenvy = "0.15"
 encoding_rs = "0.8"
 regex = "1.10"
 futures = "0.3"
+
+[profile.release]
+opt-level = "z"        # 优先极致优化文件体积
+lto = true             # 开启链接时优化 (LTO)
+codegen-units = 1      # 单代码生成单元以最大化跨 crate 优化
+panic = "abort"        # 发生 panic 时直接 abort，去除无用回溯代码
+strip = true           # 剥离所有符号和调试信息
+
